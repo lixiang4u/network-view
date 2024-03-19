@@ -43,9 +43,18 @@ type IPv6 struct {
 
 // TCP 参考：layers.TCP
 type TCP struct {
-	SrcPort                                    layers.TCPPort
-	DstPort                                    layers.TCPPort
-	FIN, SYN, RST, PSH, ACK, URG, ECE, CWR, NS bool
+	SrcPort layers.TCPPort
+	DstPort layers.TCPPort
+
+	FIN,
+	SYN,
+	RST,
+	PSH,
+	ACK,
+	URG,
+	ECE,
+	CWR,
+	NS bool
 }
 
 // UDP 参考：layers.UDP

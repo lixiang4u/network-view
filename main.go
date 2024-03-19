@@ -15,6 +15,8 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGKILL)
 
+	//go handler.StatTicker()
+
 	deviceList, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("[FindDeviceError]", err.Error())
