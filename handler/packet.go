@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -11,6 +12,7 @@ import (
 	"github.com/yusufpapurcu/wmi"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -28,13 +30,16 @@ func HandlePacketsLive(device string, snapshotLen int32, promiscuous bool, timeo
 	// Use the handle as a packet source to process all packets
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 	for packet := range packetSource.Packets() {
-		// Process packet here
-		pkt, err := handlerPacketInfo(packet)
-		if err != nil {
-			log.Println("[ErrorLayer]", err.Error())
-			continue
-		}
-		showPacketLog(pkt)
+		stats := getNetConnections()
+		go func(packet gopacket.Packet, stats []net.ConnectionStat) {
+			// Process packet here
+			pkt, err := handlerPacketInfo(packet)
+			if err != nil {
+				log.Println("[ErrorLayer]", err.Error())
+				return
+			}
+			showPacketLog(pkt, &stats)
+		}(packet, stats)
 
 	}
 }
@@ -132,52 +137,83 @@ func handlerPacketInfo(packet gopacket.Packet) (model.Packet, gopacket.ErrorLaye
 	return parsedPacket, packet.ErrorLayer()
 }
 
-func showPacketLog(pkt model.Packet) {
+func showPacketLog(pkt model.Packet, stats *[]net.ConnectionStat) {
 	var protocol string
 	var src string
 	var dst string
 	var processName string
+	var pid int32
 	if pkt.IsIPv4 {
 		src = fmt.Sprintf("%s:%d", pkt.IPv4.SrcIP.String(), pkt.TCP.SrcPort)
 		dst = fmt.Sprintf("%s:%d", pkt.IPv4.DstIP.String(), pkt.TCP.DstPort)
-		process, err := findProcessById(findConnectionPid(uint32(pkt.TCP.SrcPort), uint32(pkt.TCP.DstPort)))
-		if err == nil {
-			processName = fmt.Sprintf("[%s] [%s]", process.Name, pkt.TCP.DstPort.String())
-		}
+		pid = findConnectionPid(uint32(pkt.TCP.SrcPort), uint32(pkt.TCP.DstPort), stats)
+		process, _ := findProcessById(pid)
+		processName = fmt.Sprintf("[%s,%d] [%s]", process.Name, pid, parsePortName(pkt.TCP.SrcPort, pkt.TCP.DstPort))
+
 		protocol = pkt.IPv4.Protocol.String()
 	}
 	if pkt.IsIPv6 {
 		src = fmt.Sprintf("%s:%d", pkt.IPv6.SrcIP.String(), pkt.TCP.SrcPort)
 		dst = fmt.Sprintf("%s:%d", pkt.IPv6.DstIP.String(), pkt.TCP.DstPort)
-		process, err := findProcessById(findConnectionPid(uint32(pkt.TCP.SrcPort), uint32(pkt.TCP.DstPort)))
-		if err == nil {
-			processName = fmt.Sprintf("[%s] [%s]", process.Name, pkt.TCP.DstPort.String())
-		}
+		pid = findConnectionPid(uint32(pkt.TCP.SrcPort), uint32(pkt.TCP.DstPort), stats)
+		process, _ := findProcessById(pid)
+		processName = fmt.Sprintf("[%s,%d] [%s]", process.Name, pid, parsePortName(pkt.TCP.SrcPort, pkt.TCP.DstPort))
+
 		protocol = pkt.IPv6.NextHeader.String()
 	}
 	if pkt.IsUDP {
-		src = fmt.Sprintf("%s:%d", pkt.IPv4.SrcIP.String(), pkt.UDP.SrcPort)
-		dst = fmt.Sprintf("%s:%d", pkt.IPv4.DstIP.String(), pkt.UDP.DstPort)
-		process, err := findProcessById(findConnectionPid(uint32(pkt.UDP.SrcPort), uint32(pkt.UDP.DstPort)))
-		if err == nil {
-			processName = fmt.Sprintf("[%s] [%s]", process.Name, pkt.UDP.DstPort.String())
+		if len(pkt.IPv4.SrcIP) > 0 {
+			src = fmt.Sprintf("%s:%d", pkt.IPv4.SrcIP.String(), pkt.UDP.SrcPort)
 		}
+		if len(pkt.IPv6.SrcIP) > 0 {
+			src = fmt.Sprintf("%s:%d", pkt.IPv6.SrcIP.String(), pkt.UDP.SrcPort)
+		}
+		if len(pkt.IPv4.DstIP) > 0 {
+			dst = fmt.Sprintf("%s:%d", pkt.IPv4.DstIP.String(), pkt.UDP.DstPort)
+		}
+		if len(pkt.IPv6.DstIP) > 0 {
+			dst = fmt.Sprintf("%s:%d", pkt.IPv6.DstIP.String(), pkt.UDP.DstPort)
+		}
+		pid = findConnectionPid(uint32(pkt.UDP.SrcPort), uint32(pkt.UDP.DstPort), stats)
+		process, _ := findProcessById(pid)
+		processName = fmt.Sprintf("[%s,%d] [%s]", process.Name, pid, parsePortName(pkt.UDP.DstPort, pkt.UDP.DstPort))
+
 		protocol = "UDP"
 	}
 	if pkt.IsDNS {
-		log.Println("[ResponseCode]", pkt.DNS.ResponseCode.String())
+		var extra string
+		extra = fmt.Sprintf("%s\tDNS ResponseCode: %s\r\n", extra, pkt.DNS.ResponseCode.String())
 		for _, question := range pkt.DNS.Questions {
-			log.Println("[Questions]", string(question.Name), question.Type.String(), question.Class.String())
+			//log.Println("[Questions]", string(question.Name), question.Type.String(), question.Class.String())
+			extra = fmt.Sprintf("%s\tDNS Question: %s %s %s\r\n", extra, string(question.Name), question.Type.String(), question.Class.String())
 		}
 		for _, answer := range pkt.DNS.Answers {
-			log.Println("[Answers]", string(answer.Name), answer.Type.String(), answer.Class.String(), answer.IP.String())
+			//log.Println("[Answers]", string(answer.Name), answer.Type.String(), answer.Class.String(), answer.IP.String())
+			extra = fmt.Sprintf("%s\tDNS Answer:    %s %s %s %s\r\n", extra, string(answer.Name), answer.Type.String(), answer.Class.String(), answer.IP.String())
 		}
-		src = fmt.Sprintf("%s:%d", pkt.IPv4.SrcIP.String(), pkt.UDP.SrcPort)
-		dst = fmt.Sprintf("%s:%d", pkt.IPv4.DstIP.String(), pkt.UDP.DstPort)
-		process, err := findProcessById(findConnectionPid(uint32(pkt.UDP.SrcPort), uint32(pkt.UDP.DstPort)))
-		if err == nil {
-			processName = fmt.Sprintf("[%s] [%s]", process.Name, pkt.UDP.DstPort.String())
+
+		if len(pkt.IPv4.SrcIP) > 0 {
+			src = fmt.Sprintf("%s:%d", pkt.IPv4.SrcIP.String(), pkt.UDP.SrcPort)
 		}
+		if len(pkt.IPv6.SrcIP) > 0 {
+			src = fmt.Sprintf("%s:%d", pkt.IPv6.SrcIP.String(), pkt.UDP.SrcPort)
+		}
+		if len(pkt.IPv4.DstIP) > 0 {
+			dst = fmt.Sprintf("%s:%d", pkt.IPv4.DstIP.String(), pkt.UDP.DstPort)
+		}
+		if len(pkt.IPv6.DstIP) > 0 {
+			dst = fmt.Sprintf("%s:%d", pkt.IPv6.DstIP.String(), pkt.UDP.DstPort)
+		}
+		pid = findConnectionPid(uint32(pkt.UDP.SrcPort), uint32(pkt.UDP.DstPort), stats)
+		process, _ := findProcessById(pid)
+		processName = fmt.Sprintf(
+			"[%s,%d] [%s]\r\n%s",
+			process.Name,
+			pid,
+			parsePortName(pkt.UDP.DstPort, pkt.UDP.SrcPort),
+			strings.TrimRight(extra, "\r\n"),
+		)
+
 		protocol = "DNS"
 	}
 	if len(protocol) == 0 {
@@ -197,14 +233,15 @@ func showPacketLog(pkt model.Packet) {
 func getNetConnections() []net.ConnectionStat {
 	var conn = make([]net.ConnectionStat, 0)
 	conn, _ = net.Connections("inet")
+	//ToJson(conn)
 	return conn
 }
 
-func findConnectionPid(srcPort, dstPort uint32) (pid int32) {
+func findConnectionPid(srcPort, dstPort uint32, stats *[]net.ConnectionStat) (pid int32) {
 	if srcPort == 0 && dstPort == 0 {
 		return
 	}
-	for _, conn := range getNetConnections() {
+	for _, conn := range *stats {
 		if conn.Laddr.Port == srcPort && conn.Raddr.Port == dstPort {
 			pid = conn.Pid
 			break
@@ -227,7 +264,30 @@ func findProcessById(pid int32) (process model.Win32_Process, err error) {
 	if err != nil {
 		return process, err
 	}
+	if len(result) == 0 {
+		return process, errors.New("no process found")
+	}
 	return result[0], nil
+}
+
+func parsePortName(port1, port2 interface{}) string {
+	switch v := port1.(type) {
+	case layers.TCPPort:
+		if name, ok := layers.TCPPortNames[(v)]; ok {
+			return fmt.Sprintf("%d(%s)", port1, name)
+		}
+		if name, ok := layers.TCPPortNames[(v)]; ok {
+			return fmt.Sprintf("%d(%s)", port2, name)
+		}
+	case layers.UDPPort:
+		if name, ok := layers.UDPPortNames[(v)]; ok {
+			return fmt.Sprintf("%d(%s)", port1, name)
+		}
+		if name, ok := layers.UDPPortNames[(v)]; ok {
+			return fmt.Sprintf("%d(%s)", port2, name)
+		}
+	}
+	return ""
 }
 
 func ToJson(v interface{}) string {
